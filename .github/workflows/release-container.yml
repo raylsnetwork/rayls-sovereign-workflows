@@ -19,13 +19,16 @@ on:
         required: true
         type: string
       namespace:
-        description: Registry namespace the images live under.
+        description: >-
+          Registry namespace. Kept separate from the flat rayls-* repositories
+          in this registry, which the privacy product already owns
+          (rayls-relayer and rayls-contracts are live there on v2.x).
         type: string
         default: rayls-sovereign
       registry_alias:
-        description: ECR Public registry alias.
+        description: ECR Public registry alias (professional-services account).
         type: string
-        default: w0k9o1t3
+        default: v9x7l0q0
       platforms:
         type: string
         default: linux/amd64,linux/arm64
