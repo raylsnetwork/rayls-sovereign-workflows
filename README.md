@@ -2,6 +2,46 @@
 
 Shared CI for the Rayls Sovereign repositories.
 
+Two workflows:
+
+| | Trigger | Does | Never does |
+|---|---|---|---|
+| `ci-container.yml` | your PR | builds every architecture, then Trivy | touches ECR |
+| `release-container.yml` | a `v*` tag | builds and publishes | deploys |
+
+## `ci-container.yml`
+
+Proves the images still build, and scans them. No AWS credentials at all.
+
+Call it on `pull_request`, **never `pull_request_target`**. These repos are
+public: `pull_request_target` would run a fork's code with the base repo's
+secrets. `pull_request` gives a fork a read-only token and no secrets.
+
+```yaml
+name: CI
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  images:
+    uses: raylsnetwork/rayls-sovereign-workflows/.github/workflows/ci-container.yml@v1
+    with:
+      images: >-
+        [{"image": "ops-api", "dockerfile": "Dockerfile"}]
+```
+
+| Input | Default | |
+|---|---|---|
+| `images` | — | JSON array of `{image, dockerfile}` |
+| `platforms` | `linux/amd64,linux/arm64` | architectures the build must succeed for |
+| `scan_platform` | `linux/amd64` | the one loaded and scanned |
+| `scan_severity` | `CRITICAL` | what fails the build |
+
+Both architectures are built on purpose. A Dockerfile that hardcodes an
+architecture builds fine on amd64 and only fails when someone runs the arm64
+image — which is exactly the bug this caught in `rayls-sovereign-contracts`.
+
 ## `release-container.yml`
 
 A maintainer pushes a `v*` tag; the workflow builds every image the caller

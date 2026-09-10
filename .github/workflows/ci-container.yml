@@ -1,0 +1,92 @@
+name: CI container images
+
+# Pull-request checks for the Rayls Sovereign images: prove they still build,
+# then scan them. Nothing is published and no AWS credentials are involved.
+#
+# Callers must trigger this on `pull_request`, never `pull_request_target`.
+# These repositories are public, so a pull_request_target build would hand a
+# fork's code the base repo's secrets. `pull_request` runs a fork with a
+# read-only token and no secrets, which is exactly what a build check needs.
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: >-
+          JSON array of the images this repo publishes, e.g.
+          [{"image":"cts","dockerfile":"cts/Dockerfile"}]
+        required: true
+        type: string
+      platforms:
+        description: >-
+          Architectures to prove the build for. Worth keeping both: a Dockerfile
+          that hardcodes an architecture builds fine on amd64 and only fails
+          when someone runs the arm64 image.
+        type: string
+        default: linux/amd64,linux/arm64
+      scan_severity:
+        description: Severities that fail the build.
+        type: string
+        default: CRITICAL
+      scan_platform:
+        description: The single architecture actually loaded and scanned.
+        type: string
+        default: linux/amd64
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.images) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Every architecture we ship, built and discarded. This is the check that
+      # would have caught the contracts Dockerfile shipping an x86-64 binary
+      # inside the arm64 image.
+      - name: Build for every target architecture
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      # Trivy needs a real image in the local daemon, and `load` only takes one
+      # architecture. Layers come from the cache the step above just wrote, so
+      # this is close to free.
+      - name: Load one architecture for scanning
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.scan_platform }}
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:pr
+          cache-from: type=gha,scope=${{ matrix.image }}
+
+      - name: Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:pr
+          format: table
+          severity: ${{ inputs.scan_severity }}
+          # A finding with no released fix cannot be acted on in this PR, so it
+          # blocks nothing. Drop this once the images have a patch cadence.
+          ignore-unfixed: true
+          exit-code: '1'
+        env:
+          # The scanner pulls its database from ghcr.io; these mirrors avoid the
+          # anonymous rate limit that otherwise fails runs at busy times.
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
+          TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
