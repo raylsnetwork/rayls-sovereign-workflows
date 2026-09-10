@@ -1,0 +1,161 @@
+name: Release container images
+
+# Reusable release pipeline for the Rayls Sovereign repositories.
+# A maintainer pushes a v* tag; this builds every image the caller lists and
+# publishes it to ECR Public. The pipeline ends at publish — deploy is manual.
+#
+# A tag is rejected before anything is built unless it:
+#   1. points at a commit on main,
+#   2. is newer than the last release in its own X.Y line, and
+#   3. contains that release — so a version can never ship without an earlier fix.
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: >-
+          JSON array of the images this repo publishes, e.g.
+          [{"image":"cts","dockerfile":"cts/Dockerfile"}]
+        required: true
+        type: string
+      namespace:
+        description: Registry namespace the images live under.
+        type: string
+        default: rayls-sovereign
+      registry_alias:
+        description: ECR Public registry alias.
+        type: string
+        default: w0k9o1t3
+      platforms:
+        type: string
+        default: linux/amd64,linux/arm64
+    secrets:
+      AWS_ROLE_ARN:
+        description: OIDC role allowed to push to ECR Public.
+        required: true
+
+env:
+  # ECR Public is only reachable through us-east-1.
+  AWS_REGION: us-east-1
+  REGISTRY: public.ecr.aws/${{ inputs.registry_alias }}
+  NAMESPACE: ${{ inputs.namespace }}
+
+jobs:
+  guard:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # merge-base needs real history
+          fetch-tags: true # the guard compares against earlier tags
+
+      - name: Tag must be on main, and must not skip a release
+        run: |
+          git fetch --no-tags origin main
+
+          # 1. the tag has to point at reviewed code
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::$GITHUB_REF_NAME does not point at a commit on main"
+            exit 1
+          fi
+
+          # 2. the tag has to contain the previous release in its own X.Y line.
+          #    Only tags that are themselves on main count — a stray tag cut from
+          #    a side branch must not be able to block every later release.
+          LINE="${GITHUB_REF_NAME%.*}"   # v1.4.4 -> v1.4
+          PREV=$(git tag --list "${LINE}.*" \
+                 | grep -Fxv "$GITHUB_REF_NAME" \
+                 | while read -r t; do
+                     if git merge-base --is-ancestor "$t" FETCH_HEAD 2>/dev/null; then
+                       echo "$t"
+                     fi
+                   done \
+                 | sort -V | tail -1)
+
+          if [ -z "$PREV" ]; then
+            echo "First release in the ${LINE} line — nothing to compare against."
+            exit 0
+          fi
+          # 2a. the version has to move forward
+          if [ "$(printf '%s\n%s\n' "$PREV" "$GITHUB_REF_NAME" | sort -V | tail -1)" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::$GITHUB_REF_NAME is not newer than $PREV — versions only go up"
+            exit 1
+          fi
+
+          # 2b. and it has to carry everything that release shipped
+          if ! git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
+            echo "::error::$GITHUB_REF_NAME does not contain $PREV — it would ship without an earlier fix"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME follows $PREV and contains it"
+
+  build:
+    name: ${{ matrix.image }}
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC to AWS — no stored keys
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.images) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR Public
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        with:
+          registry-type: public
+
+      - name: Ensure the repository exists
+        # ECR Public does not create repositories on push.
+        run: |
+          aws ecr-public describe-repositories \
+            --repository-names "${NAMESPACE}/${{ matrix.image }}" >/dev/null 2>&1 \
+          || aws ecr-public create-repository \
+            --repository-name "${NAMESPACE}/${{ matrix.image }}" >/dev/null
+
+      - name: Is this version already published?
+        # ECR Public has no immutable-tag setting, so we never push over an
+        # existing tag. Skipping rather than failing is what makes a retry work:
+        # if one of the three images fails, re-running the tag finishes the
+        # release instead of burning the version number. Safe because the tag
+        # ruleset stops a v* tag from being moved, so a tag is always one commit.
+        id: published
+        run: |
+          if aws ecr-public describe-images \
+               --repository-name "${NAMESPACE}/${{ matrix.image }}" \
+               --image-ids imageTag="$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::warning::${{ matrix.image }}:$GITHUB_REF_NAME is already published — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: steps.published.outputs.skip == 'false'
+
+      - name: Build and push
+        if: steps.published.outputs.skip == 'false'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
