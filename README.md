@@ -79,11 +79,24 @@ jobs:
 | Input | Default | |
 |---|---|---|
 | `images` | — | JSON array of `{image, dockerfile}` |
-| `namespace` | `rayls-sovereign` | registry namespace |
-| `registry_alias` | `w0k9o1t3` | ECR Public alias |
+| `image_prefix` | `sovereign-` | prefixed onto every image name |
+| `registry_alias` | `rayls` | ECR Public alias |
 | `platforms` | `linux/amd64,linux/arm64` | |
 
 `AWS_ROLE_ARN` must be an OIDC role allowed to push to ECR Public.
+
+### Where images land
+
+```
+public.ecr.aws/rayls/sovereign-<image>:<version>
+```
+
+The registry has two aliases — `v9x7l0q0` (auto-generated default) and `rayls`
+(custom, primary). Use `rayls`.
+
+The `sovereign-` prefix keeps these clear of the `rayls-*` repositories the
+privacy product owns; `rayls-relayer` and `rayls-contracts` are live there on
+the v2.x line. The alias already says `rayls`, so the name does not repeat it.
 
 ### Notes
 

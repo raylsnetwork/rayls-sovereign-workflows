@@ -18,17 +18,20 @@ on:
           [{"image":"cts","dockerfile":"cts/Dockerfile"}]
         required: true
         type: string
-      namespace:
+      image_prefix:
         description: >-
-          Registry namespace. Kept separate from the flat rayls-* repositories
-          in this registry, which the privacy product already owns
-          (rayls-relayer and rayls-contracts are live there on v2.x).
+          Prefixed onto every image name. Keeps these clear of the rayls-*
+          repositories the privacy product owns — rayls-relayer and
+          rayls-contracts are live there on the v2.x line. The registry alias
+          already says "rayls", so the name does not repeat it.
         type: string
-        default: rayls-sovereign
+        default: sovereign-
       registry_alias:
-        description: ECR Public registry alias (professional-services account).
+        description: >-
+          ECR Public registry alias. This registry has two — v9x7l0q0, the
+          auto-generated default, and rayls, the custom primary. Use rayls.
         type: string
-        default: v9x7l0q0
+        default: rayls
       platforms:
         type: string
         default: linux/amd64,linux/arm64
@@ -41,7 +44,7 @@ env:
   # ECR Public is only reachable through us-east-1.
   AWS_REGION: us-east-1
   REGISTRY: public.ecr.aws/${{ inputs.registry_alias }}
-  NAMESPACE: ${{ inputs.namespace }}
+  IMAGE_PREFIX: ${{ inputs.image_prefix }}
 
 jobs:
   guard:
@@ -121,9 +124,9 @@ jobs:
         # ECR Public does not create repositories on push.
         run: |
           aws ecr-public describe-repositories \
-            --repository-names "${NAMESPACE}/${{ matrix.image }}" >/dev/null 2>&1 \
+            --repository-names "${IMAGE_PREFIX}${{ matrix.image }}" >/dev/null 2>&1 \
           || aws ecr-public create-repository \
-            --repository-name "${NAMESPACE}/${{ matrix.image }}" >/dev/null
+            --repository-name "${IMAGE_PREFIX}${{ matrix.image }}" >/dev/null
 
       - name: Is this version already published?
         # ECR Public has no immutable-tag setting, so we never push over an
@@ -134,7 +137,7 @@ jobs:
         id: published
         run: |
           if aws ecr-public describe-images \
-               --repository-name "${NAMESPACE}/${{ matrix.image }}" \
+               --repository-name "${IMAGE_PREFIX}${{ matrix.image }}" \
                --image-ids imageTag="$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "::warning::${{ matrix.image }}:$GITHUB_REF_NAME is already published — skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -157,7 +160,7 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
-          tags: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:${{ github.ref_name }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
